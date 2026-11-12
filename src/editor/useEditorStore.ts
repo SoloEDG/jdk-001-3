@@ -5,6 +5,17 @@ import { addCustomColor, pushRecentColor } from '../core/paletteService'
 import { compositeLayers } from '../core/pixelGrid'
 import { createProject } from '../core/projectFactory'
 import {
+  blockCanvasRect,
+  clampRectPosition,
+  clearRect,
+  copyPixels,
+  normalizeRect,
+  pasteClipboard as stampClipboard,
+  rectContains,
+  rectsEqual,
+  stampBlock,
+} from '../core/selection'
+import {
   ensureDefaultProject,
   loadPreferences,
   loadProjects,
@@ -13,7 +24,14 @@ import {
   saveProjects,
   upsertProject,
 } from '../core/storage'
-import type { CanvasSize, PixelProject, ToolType } from '../core/types'
+import type {
+  CanvasSize,
+  Pixel,
+  PixelClipboard,
+  PixelProject,
+  SelectionRect,
+  ToolType,
+} from '../core/types'
 import { createAnimationPlayer } from './animationPlayer'
 import {
   addFrameToProject,
@@ -31,8 +49,23 @@ const projects = ref<PixelProject[]>(ensureDefaultProject(loadProjects()))
 const prefs = reactive(loadPreferences())
 
 const linePending = ref<LinePending | null>(null)
+const selection = ref<SelectionRect | null>(null)
+const clipboard = ref<PixelClipboard | null>(null)
+const selectionDrag = ref<SelectionDragState | null>(null)
 const isPlaying = ref(false)
 const previewFrameIndex = ref<number | null>(null)
+
+interface SelectionDragState {
+  mode: 'new' | 'move'
+  anchorX: number
+  anchorY: number
+  startX: number
+  startY: number
+  originRect: SelectionRect | null
+  snapshot: Pixel[] | null
+  snapshotWidth: number
+  snapshotHeight: number
+}
 
 const player = createAnimationPlayer({ isPlaying, previewFrameIndex })
 
@@ -89,9 +122,182 @@ watch(
   () => prefs.activeProjectId,
   () => {
     linePending.value = null
+    clearSelection()
     player.stop()
   },
 )
+
+function clearSelection() {
+  selection.value = null
+  selectionDrag.value = null
+}
+
+/** Begin a marquee drag: inside an existing selection it moves the block, elsewhere it starts a new one. */
+function beginSelectionDrag(x: number, y: number) {
+  const p = activeProject.value
+  const frame = activeFrame.value
+  if (!p || !frame || previewFrameIndex.value !== null) return
+  if (x < 0 || y < 0 || x >= p.canvasSize || y >= p.canvasSize) return
+
+  linePending.value = null
+  const existing = selection.value
+  const layer = frame.layers[p.activeLayerIndex]
+
+  if (existing && rectContains(existing, x, y) && layer) {
+    const snapshot = copyPixels(layer.pixels, p.canvasSize, existing)
+    selectionDrag.value = {
+      mode: 'move',
+      anchorX: x,
+      anchorY: y,
+      startX: x,
+      startY: y,
+      originRect: { ...existing },
+      snapshot: snapshot.pixels,
+      snapshotWidth: snapshot.width,
+      snapshotHeight: snapshot.height,
+    }
+    return
+  }
+
+  selection.value = { x, y, width: 1, height: 1 }
+  selectionDrag.value = {
+    mode: 'new',
+    anchorX: x,
+    anchorY: y,
+    startX: x,
+    startY: y,
+    originRect: null,
+    snapshot: null,
+    snapshotWidth: 0,
+    snapshotHeight: 0,
+  }
+}
+
+function updateSelectionDrag(x: number, y: number) {
+  const drag = selectionDrag.value
+  if (!drag) return
+  const size = canvasSize.value
+
+  if (drag.mode === 'new') {
+    const cx = Math.max(0, Math.min(x, size - 1))
+    const cy = Math.max(0, Math.min(y, size - 1))
+    selection.value = normalizeRect(drag.anchorX, drag.anchorY, cx, cy)
+    return
+  }
+
+  if (!drag.originRect) return
+  const target = clampRectPosition(
+    {
+      x: drag.originRect.x + (x - drag.startX),
+      y: drag.originRect.y + (y - drag.startY),
+      width: drag.originRect.width,
+      height: drag.originRect.height,
+    },
+    size,
+  )
+  if (target) selection.value = target
+}
+
+/** Finish a drag. A moved block is written to the active layer of the active frame. */
+function endSelectionDrag() {
+  const drag = selectionDrag.value
+  selectionDrag.value = null
+  if (!drag || drag.mode !== 'move' || !drag.originRect || !drag.snapshot) return
+
+  const target = selection.value
+  if (!target || rectsEqual(target, drag.originRect)) return
+
+  const p = activeProject.value
+  const frame = activeFrame.value
+  if (!p || !frame || previewFrameIndex.value !== null) return
+
+  const origin = drag.originRect
+  const snapshot = drag.snapshot
+  const snapshotWidth = drag.snapshotWidth
+  const snapshotHeight = drag.snapshotHeight
+
+  mutateProject((proj) => {
+    const fr = proj.frames[proj.activeFrameIndex]
+    const active = fr?.layers[proj.activeLayerIndex]
+    if (!fr || !active) return proj
+    const cleared = clearRect(active.pixels, proj.canvasSize, origin)
+    const moved = stampBlock(
+      cleared,
+      proj.canvasSize,
+      { width: snapshotWidth, height: snapshotHeight, pixels: snapshot },
+      target.x,
+      target.y,
+    )
+    const layers = fr.layers.map((l, i) =>
+      i === proj.activeLayerIndex ? { ...l, pixels: moved } : l,
+    )
+    return withFrameLayers(proj, proj.activeFrameIndex, layers)
+  })
+}
+
+/** Snapshot the selected block from the active layer. Source pixels stay untouched. */
+function copySelection() {
+  const p = activeProject.value
+  const frame = activeFrame.value
+  const current = selection.value
+  if (!p || !frame || !current) return
+  const layer = frame.layers[p.activeLayerIndex]
+  if (!layer) return
+  clipboard.value = copyPixels(layer.pixels, p.canvasSize, current)
+}
+
+/** Snapshot the selected block and clear it from the active layer. */
+function cutSelection() {
+  const p = activeProject.value
+  const frame = activeFrame.value
+  const current = selection.value
+  if (!p || !frame || !current || previewFrameIndex.value !== null) return
+  const layer = frame.layers[p.activeLayerIndex]
+  if (!layer) return
+
+  clipboard.value = copyPixels(layer.pixels, p.canvasSize, current)
+  mutateProject((proj) => {
+    const fr = proj.frames[proj.activeFrameIndex]
+    const active = fr?.layers[proj.activeLayerIndex]
+    if (!fr || !active) return proj
+    const layers = fr.layers.map((l, i) =>
+      i === proj.activeLayerIndex
+        ? { ...l, pixels: clearRect(l.pixels, proj.canvasSize, current) }
+        : l,
+    )
+    return withFrameLayers(proj, proj.activeFrameIndex, layers)
+  })
+}
+
+/**
+ * Paste the clipboard snapshot onto the active layer of the current frame.
+ * A live selection provides the destination position, otherwise the snapshot's origin is used.
+ * Out-of-canvas cells are clipped and transparent cells stay transparent.
+ */
+function pasteSelection() {
+  const p = activeProject.value
+  const frame = activeFrame.value
+  const clip = clipboard.value
+  if (!p || !frame || !clip || previewFrameIndex.value !== null) return
+
+  const destX = selection.value ? selection.value.x : clip.x
+  const destY = selection.value ? selection.value.y : clip.y
+  const pastedRect = blockCanvasRect(clip, destX, destY, p.canvasSize)
+
+  mutateProject((proj) => {
+    const fr = proj.frames[proj.activeFrameIndex]
+    const active = fr?.layers[proj.activeLayerIndex]
+    if (!fr || !active) return proj
+    const layers = fr.layers.map((l, i) =>
+      i === proj.activeLayerIndex
+        ? { ...l, pixels: stampClipboard(l.pixels, proj.canvasSize, clip, destX, destY) }
+        : l,
+    )
+    return withFrameLayers(proj, proj.activeFrameIndex, layers)
+  })
+
+  selection.value = pastedRect
+}
 
 function recordColorUse(color: string) {
   mutateProject((p) => ({
@@ -107,6 +313,7 @@ function setActiveColor(color: string) {
 }
 
 function setTool(tool: ToolType) {
+  if (prefs.activeTool !== tool) clearSelection()
   prefs.activeTool = tool
   if (tool !== 'line') linePending.value = null
   persistPrefs()
@@ -114,6 +321,7 @@ function setTool(tool: ToolType) {
 
 function setCanvasSize(size: CanvasSize) {
   if (!CANVAS_SIZES.includes(size)) return
+  clearSelection()
   mutateProject((p) => withCanvasSize(p, size))
 }
 
@@ -167,15 +375,18 @@ function addLayer() {
 
 function setActiveFrame(index: number) {
   previewFrameIndex.value = null
+  clearSelection()
   mutateProject((p) => ({ ...p, activeFrameIndex: index }))
   linePending.value = cancelLineTool()
 }
 
 function addFrame() {
+  clearSelection()
   mutateProject((p) => addFrameToProject(p) ?? p)
 }
 
 function deleteFrame(index: number) {
+  clearSelection()
   mutateProject((p) => deleteFrameAt(p, index))
 }
 
@@ -185,6 +396,7 @@ function setFrameDelay(ms: number) {
 }
 
 function togglePlayback() {
+  clearSelection()
   player.toggle(activeProject.value)
 }
 
@@ -211,6 +423,7 @@ function createNewProject(name?: string) {
   persistProjects()
   persistPrefs()
   linePending.value = null
+  clearSelection()
   player.stop()
 }
 
@@ -218,6 +431,7 @@ function loadProject(id: string) {
   prefs.activeProjectId = id
   persistPrefs()
   linePending.value = null
+  clearSelection()
   player.stop()
 }
 
@@ -232,6 +446,7 @@ function deleteProject(id: string) {
   }
   persistProjects()
   persistPrefs()
+  clearSelection()
   player.stop()
 }
 
@@ -267,12 +482,22 @@ function buildEditorStore() {
     activeFrame,
     compositePixels,
     linePending,
+    selection,
+    clipboard,
+    selectionDrag,
     isPlaying,
     previewFrameIndex,
     setActiveColor,
     setTool,
     setCanvasSize,
     onCanvasPointer,
+    beginSelectionDrag,
+    updateSelectionDrag,
+    endSelectionDrag,
+    clearSelection,
+    copySelection,
+    cutSelection,
+    pasteSelection,
     setActiveLayer,
     toggleLayerVisible,
     deleteLayer,

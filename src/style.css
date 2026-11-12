@@ -124,6 +124,20 @@ body {
   color: var(--accent);
 }
 
+.selection-actions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.35rem;
+}
+
+.selection-actions .action {
+  margin-top: 0;
+}
+
+.clipboard-hint {
+  color: var(--accent);
+}
+
 .swatches {
   display: grid;
   grid-template-columns: repeat(8, 1fr);
@@ -210,10 +224,13 @@ body {
 }
 
 .pixel-grid {
+  position: relative;
   display: grid;
   border: 2px solid var(--border);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
   background: #1e2128;
+  touch-action: none;
+  user-select: none;
 }
 
 .pixel-cell {
@@ -226,6 +243,39 @@ body {
 
 .pixel-cell:not([style*='background-color: transparent']) {
   background-image: none;
+}
+
+/* Marquee outline drawn above the pixels. */
+.selection-marquee {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+  border: 1px dashed #ffffff;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.65),
+    inset 0 0 0 1px rgba(91, 156, 255, 0.85);
+}
+
+/* Floating block preview while the selection is being dragged. */
+.selection-floating {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  pointer-events: none;
+  outline: 1px dashed rgba(91, 156, 255, 0.9);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+}
+
+.floating-cell {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.canvas-hint {
+  margin: 0.75rem 0 0;
+  font-size: 0.78rem;
+  color: var(--muted);
 }
 
 .right-rail {

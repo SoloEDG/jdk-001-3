@@ -12,6 +12,7 @@ const tools: { id: ToolType; label: string; hint: string }[] = [
   { id: 'bucket', label: '油漆桶', hint: '区域填充' },
   { id: 'eyedropper', label: '吸管', hint: '吸取颜色' },
   { id: 'line', label: '直线', hint: '两点连线' },
+  { id: 'select', label: '选区', hint: '矩形框选、移动、复制粘贴' },
 ]
 </script>
 
@@ -40,6 +41,53 @@ const tools: { id: ToolType; label: string; hint: string }[] = [
       <p v-if="store.prefs.activeTool === 'line' && store.linePending" class="hint line-hint">
         已选起点，点击终点完成直线
       </p>
+    </section>
+
+    <section v-if="store.prefs.activeTool === 'select'" class="panel selection-panel">
+      <h3>选区操作</h3>
+      <p v-if="store.selection" class="hint">
+        已选 {{ store.selection.width }}×{{ store.selection.height }} 格 @ ({{ store.selection.x }},
+        {{ store.selection.y }})
+      </p>
+      <p v-else class="hint">在画布上拖动框选一块区域</p>
+      <div class="selection-actions">
+        <button
+          type="button"
+          class="action"
+          :disabled="!store.selection"
+          @click="store.copySelection"
+        >
+          复制
+        </button>
+        <button
+          type="button"
+          class="action"
+          :disabled="!store.selection"
+          @click="store.cutSelection"
+        >
+          剪切
+        </button>
+        <button
+          type="button"
+          class="action"
+          :disabled="!store.clipboard"
+          @click="store.pasteSelection"
+        >
+          粘贴
+        </button>
+      </div>
+      <button
+        type="button"
+        class="action"
+        :disabled="!store.selection"
+        @click="store.clearSelection"
+      >
+        取消选区
+      </button>
+      <p v-if="store.clipboard" class="hint clipboard-hint">
+        剪贴板：{{ store.clipboard.width }}×{{ store.clipboard.height }} 格
+      </p>
+      <p class="hint">粘贴落到当前帧的当前图层；切帧或切工具后选区自动取消</p>
     </section>
 
     <section class="panel">
